@@ -12,23 +12,26 @@ tries to break in, and then the mirror lights up with a scream.
 
 ## How it works
 
-| Says "bloody mary" | What happens                                                                 |
-|--------------------|------------------------------------------------------------------------------|
-| 1st time           | The flickering LED candles go out (IR remote code, sent 3× to reach every candle) |
-| 2nd time           | Someone tries the door knob, knocks softly, then pounds on the door (Bluetooth audio on a stereo speaker) |
-| 3rd time           | A floodlight lights up a mask behind a shadow box, and the phone screams      |
+| Moment | What happens |
+|--------|--------------|
+| Guest walks in     | The phone's camera recognizes them and Mary greets them by name in a creepy ElevenLabs voice ("Sarah... I've been waiting for you"). Unknown faces get a nameless greeting |
+| 1st "bloody mary"            | The flickering LED candles go out (IR remote code, sent 3× to reach every candle) |
+| 2nd "bloody mary"  | Someone tries the door knob, knocks softly, then pounds on the door (Bluetooth audio on a stereo speaker) |
+| 3rd "bloody mary"  | A floodlight lights up a mask behind a shadow box, the phone screams, then Mary says something horrible to the guest by name |
 
-A **Reset** button in the app relights the candles and turns everything off for
-the next guest.
+After 1 minute without a new "bloody mary", whether mid-show or after the
+scream, everything resets by itself for the next guest: candles back on, light
+off. The app also has a **Reset** button.
 
 ```mermaid
 flowchart LR
     subgraph Phone["Android phone"]
         Mic["Mic → Vosk<br/>offline speech"] --> Show["Show state machine"]
-        Show --> Scream["Scream<br/>(built-in speaker)"]
+        Cam["Camera → ML Kit + FaceNet<br/>face recognition"] --> Show
+        Show --> Scream["Scream + voice lines<br/>(built-in speaker)"]
     end
-    Show -- "HTTP over Wi-Fi" --> ESP["ESP32"]
-    ESP -- "IR (NEC)" --> Candles["LED candles"]
+    Show -- "UDP over Wi-Fi" --> ESP["ESP32"]
+    ESP -- "IR (NEC), 2 LEDs" --> Candles["LED candles"]
     ESP -- "Bluetooth A2DP" --> Amp["Bluetooth amplifier"] --> Speaker["Speaker"]
     ESP -- "GPIO 33 → MOSFET" --> Light["Floodlight"]
 ```
@@ -38,7 +41,11 @@ flowchart LR
   limited to the phrase itself to cut down false triggers
 - The ESP32 streams WAV audio from its own flash straight to a Bluetooth
   amplifier, so no extra audio hardware is needed
-- Built-in IR sniffer to capture and replay codes from any remote
+- Two IR LEDs driven by the same hardware PWM channel, each covering half of the candles
+- Low-latency triggers: one UDP packet per effect, with the scream preloaded
+- On-device face recognition (ML Kit + FaceNet). Photos and face data never leave the phone
+- Personalized voice lines generated once with [ElevenLabs](https://elevenlabs.io)
+  and cached, so they play instantly and offline during the show
 - Every effect can be tested without the phone, over serial or `curl`
 
 ## Hardware
@@ -46,8 +53,7 @@ flowchart LR
 | Part | Notes |
 |------|-------|
 | ESP32 DevKit V1 (DOIT) | Any classic ESP32 works. Bluetooth audio needs Classic BT, so no S2/S3/C3 |
-| IR LED (940 nm) + resistor | A transistor driver gives better range |
-| 38 kHz IR receiver (VS1838B / TSOP38238) | Only needed to capture codes from a new remote |
+| 2× IR LED (940 nm) + resistors | One per half of the candle array. A transistor driver gives better range |
 | Remote-controlled LED candles | NEC protocol. Other protocols work after capturing their codes |
 | Bluetooth amplifier + passive speaker | Built with a Facmogu F900S (BT 5.0, 12 V) |
 | 5 V USB spotlight | Must turn on when powered, with no button press |
@@ -58,8 +64,8 @@ flowchart LR
 
 | Function    | ESP32 pin | Connection |
 |-------------|-----------|------------|
-| IR receiver | GPIO 25   | Receiver OUT pin |
-| IR LED      | GPIO 27   | Anode, through the resistor or driver |
+| IR LED 1    | GPIO 27   | Anode, through the resistor or driver |
+| IR LED 2    | GPIO 25   | Same, carries an identical signal to GPIO 27 |
 | Floodlight  | GPIO 33   | MOSFET gate, with 10 kΩ gate → GND. The MOSFET switches the spotlight's USB ground |
 
 ## Getting started
@@ -119,14 +125,46 @@ so its IP address stays the same.
 1. Download [vosk-model-small-en-us-0.15](https://alphacephei.com/vosk/models)
    and unzip its contents (`am/`, `conf/`, `graph/`, `ivector/`) into
    `android/app/src/main/assets/model-en-us/`.
-2. Add the scream as `android/app/src/main/assets/scream.mp3` (or `.wav`).
-3. Open the `android/` folder in Android Studio. Connect the phone with USB
+2. Download the face model
+   [facenet_512.tflite](https://github.com/shubham0204/FaceRecognition_With_FaceNet_Android/raw/master/app/src/main/assets/facenet_512.tflite)
+   (Apache-2.0) into `android/app/src/main/assets/`.
+3. Add the scream as `android/app/src/main/assets/scream.mp3` (or `.wav`).
+4. Open the `android/` folder in Android Studio. Connect the phone with USB
    debugging on, and press **Run**.
-4. Allow microphone access and enter the ESP32's IP address. The status line
+5. Allow microphone and camera access. Enter the ESP32's address
+   (`bloodymary.local` usually works, otherwise use its IP). The status line
    should read `amp connected`.
 
-Press **Reset** before each guest. **Next stage** fires the next effect by hand,
-for rehearsals.
+### 5. Guests and voice
+
+1. **Voice:** in **Settings**, enter your ElevenLabs API key and a voice ID
+   (pick a scary voice in the ElevenLabs Voice Library and copy its ID). The
+   model defaults to `eleven_v4`. The key is stored only on the phone.
+2. **Guests**, either way, or both:
+   - **Import photos:** put photos in a folder on the phone, named after each
+     guest (`Sarah.jpg`, `Sarah_2.jpg`, `Mary_Jane.png`), and pick that folder.
+     Several photos per person improve recognition.
+   - **Add guest:** type a name, have them look at the camera, press Capture.
+3. Each guest's greeting and finale lines are generated right away and saved.
+   This needs internet then, but not during the show. Only the line's text,
+   including the guest's name, is sent to ElevenLabs; photos and face data stay
+   on the phone. **Guests → Generate
+   voices** fills in anything missing, and lines already generated aren't paid
+   for again.
+
+Edit the lines in `VoiceLines` ([VoiceBank.kt](android/app/src/main/java/com/bloodymary/app/VoiceBank.kt)).
+Changed lines are regenerated automatically. Until a line is generated, the
+phone's own voice says it, pitched down.
+
+**Camera placement:** the phone has to see guests' faces with some light on
+them. Candlelight alone is often too dark for recognition, so a dim light on
+the face helps. Set front or back camera in **Settings**. The screen shows who
+it sees and the match score; names are used above 0.5 (`MATCH_THRESHOLD` in
+`GuestStore.kt`).
+
+The show resets itself after 1 minute idle. **Reset** does it by hand, and
+**Next stage** fires the next effect for rehearsals. The screen shows what the
+recognizer is hearing, which helps when tuning.
 
 ## Testing without the phone
 
@@ -138,9 +176,9 @@ for rehearsals.
 | `a` | Play break-in audio |
 | `l` | Toggle floodlight |
 | `x` | Reset |
-| `r` | Replay the last captured IR code |
 
-**HTTP API.** These are the endpoints the app uses. Each returns the status as JSON.
+**HTTP API.** The app uses `/status` and `/reset`. The others are for testing.
+Each returns the status as JSON.
 
 | Endpoint | Action |
 |----------|--------|
@@ -154,27 +192,42 @@ for rehearsals.
 curl http://192.168.1.50/candles/off
 ```
 
-**Capturing another remote:** point it at the IR receiver and press a button.
-The log prints the protocol, address and command, plus a ready-to-paste
-`IrSender.send…` line. The candle codes live in [src/candles.cpp](src/candles.cpp).
+**UDP triggers.** The app sends show triggers as a single UDP packet
+`"<id> <command>"` to port 4210, using the commands `candles_off`,
+`audio_play`, `light_on` and `reset`. While Bluetooth is on, the ESP32's Wi-Fi
+only wakes about every 100 ms, so one packet is much faster than an HTTP
+request's several round trips. Each packet is sent 3 times, and the ESP32 runs
+it once.
+
+```sh
+echo "1 candles_off" | nc -u -w1 192.168.1.50 4210
+```
+
+**Using a different remote:** capture its codes with an IR receiver and the
+IRremote `ReceiveDump` example, then update the codes in
+[src/candles.cpp](src/candles.cpp).
 
 ## Project structure
 
 ```
 ├── src/                 ESP32 firmware
-│   ├── main.cpp         Pins, floodlight, serial commands, IR sniffer
-│   ├── candles.cpp      IR candle codes and bursts
+│   ├── main.cpp         Pins, floodlight, serial commands
+│   ├── candles.cpp      IR candle codes, bursts, mirrored second LED
 │   ├── amp_audio.cpp    WAV parsing and Bluetooth A2DP streaming
-│   └── web.cpp          Wi-Fi, mDNS and HTTP endpoints
+│   └── web.cpp          Wi-Fi, mDNS, UDP triggers and HTTP endpoints
 ├── include/             Headers and secrets.example.h
 ├── data/                Audio flashed to LittleFS (not committed)
 ├── tools/               Audio conversion script
 ├── android/             Android app (Kotlin)
 │   └── app/src/main/java/com/bloodymary/app/
 │       ├── MainActivity.kt     Operator screen
-│       ├── PhraseListener.kt   Vosk phrase detection with cooldown
-│       ├── ShowController.kt   Three-stage show logic and scream playback
-│       └── Esp32Client.kt      HTTP client with retries
+│       ├── PhraseListener.kt   Vosk phrase detection (strict "bloody mary")
+│       ├── FaceWatcher.kt      Camera analysis and live enrollment
+│       ├── FaceRecognizer.kt   ML Kit face detection + FaceNet embeddings
+│       ├── GuestStore.kt       Known guests and face matching
+│       ├── VoiceBank.kt        ElevenLabs voice lines, cache and playback
+│       ├── ShowController.kt   Three-stage show, idle auto-reset, preloaded scream
+│       └── Esp32Client.kt      UDP triggers + HTTP status/reset
 └── platformio.ini       Board, libraries, partitions, ports
 ```
 
@@ -187,7 +240,11 @@ The log prints the protocol, address and command, plus a ready-to-paste
 | Amplifier never connects | Check the `[amp] found …` lines and set `AMP_BT_NAME` to match |
 | App says "ESP32: not reachable" | Use the IP from the serial log instead of `bloodymary.local`. The phone and ESP32 must be on the same network |
 | Some candles stay lit | Aim the IR LED better, add a transistor driver, or raise `BURST_COUNT` in `src/candles.cpp` |
-| Triggers fire twice | Raise `COOLDOWN_MS` in `PhraseListener.kt` |
+| Triggers before "mary" is said | Set `CONFIRM_PARTIALS = 2` in `PhraseListener.kt` (adds about 0.2 s) |
+| Phrase not picked up | Speak clearly toward the phone. The "Heard" line shows what it recognized |
+| Guests greeted as unknown | Add more light on faces, import more photos per guest, or lower `MATCH_THRESHOLD` |
+| Wrong name used | Raise `MATCH_THRESHOLD` in `GuestStore.kt` |
+| Voice sounds robotic | ElevenLabs lines aren't generated yet. Check Settings, then **Guests → Generate voices** |
 
 ## License
 

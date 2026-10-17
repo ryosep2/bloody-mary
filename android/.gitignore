@@ -7,3 +7,4 @@ local.properties
 app/src/main/assets/model-en-us/*
 !app/src/main/assets/model-en-us/uuid
 app/src/main/assets/scream.*
+app/src/main/assets/facenet_512.tflite

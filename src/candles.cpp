@@ -1,10 +1,13 @@
 #include "candles.h"
 
-// Declarations only: main.cpp includes IRremote.hpp with the implementation
-#define USE_IRREMOTE_HPP_AS_PLAIN_INCLUDE
+#define DISABLE_CODE_FOR_RECEIVER  // send only
 #include <IRremote.hpp>
 
-// Candle remote codes (NEC, captured with the sniffer)
+#if !defined(SEND_LEDC_CHANNEL)
+#define SEND_LEDC_CHANNEL 0  // IRremote's PWM channel on Arduino core 2.x
+#endif
+
+// Candle remote codes (NEC, captured with the IRremote ReceiveDump example)
 const uint16_t CANDLE_ADDRESS = 0x0;
 const uint8_t CANDLE_CMD_ON = 0x1;
 const uint8_t CANDLE_CMD_OFF = 0x0;
@@ -19,8 +22,12 @@ static void sendBurst(uint8_t command) {
   }
 }
 
-void candlesBegin(uint8_t txPin) {
+void candlesBegin(uint8_t txPin, uint8_t mirrorPin) {
   IrSender.begin(txPin);
+  // Set up the 38 kHz PWM channel now (IRremote otherwise does it on the first
+  // send), then route the same channel to the second LED so both flash in sync
+  IrSender.enableIROut(38);
+  ledcAttachPin(mirrorPin, SEND_LEDC_CHANNEL);
 }
 
 void candlesOnBurst() {

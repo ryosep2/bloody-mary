@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.bloodymary.app"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.bloodymary.app"
@@ -24,4 +24,12 @@ dependencies {
     // Offline speech recognition
     implementation("com.alphacephei:vosk-android:0.3.75@aar")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
+
+    // Camera, face detection (ML Kit) and face recognition (FaceNet on TensorFlow Lite)
+    implementation("androidx.activity:activity-ktx:1.13.0")
+    implementation("androidx.camera:camera-camera2:1.6.2")
+    implementation("androidx.camera:camera-lifecycle:1.6.2")
+    implementation("androidx.camera:camera-view:1.6.2")
+    implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("org.tensorflow:tensorflow-lite:2.17.0")
 }
