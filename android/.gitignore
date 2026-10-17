@@ -1,0 +1,9 @@
+.gradle/
+.idea/
+build/
+local.properties
+*.iml
+# Downloaded speech model and sound files (see README)
+app/src/main/assets/model-en-us/*
+!app/src/main/assets/model-en-us/uuid
+app/src/main/assets/scream.*
