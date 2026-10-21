@@ -10,5 +10,5 @@ include/secrets.h
 
 # Audio is not redistributed: add your own (see README)
 audio/
-data/*.wav
-data/*.raw
+data/
+secrets.ini

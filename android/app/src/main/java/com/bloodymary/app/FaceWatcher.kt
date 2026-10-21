@@ -1,6 +1,17 @@
 package com.bloodymary.app
 
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
+import android.util.Range
+import android.util.Size
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import kotlin.math.sqrt
 import android.graphics.Matrix
 import android.os.Handler
 import android.os.Looper
@@ -32,31 +43,62 @@ class FaceWatcher(
     private val executor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var lastAnalysis = 0L
+    private val recent = ArrayDeque<Pair<Long, FloatArray>>()  // recent embeddings of the face in view
 
     // Live enrollment: collects embeddings until enough are captured
     private var captureTarget = 0
     private val captured = mutableListOf<FloatArray>()
     private var captureDone: ((List<FloatArray>) -> Unit)? = null
 
-    fun start(useFrontCamera: Boolean) {
+    /** Starts (or restarts) the camera. Face analysis always runs; the on-screen preview only if [showPreview]. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    fun start(useFrontCamera: Boolean, showPreview: Boolean) {
         val providerFuture = ProcessCameraProvider.getInstance(activity)
         providerFuture.addListener({
             val provider = providerFuture.get()
+            val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
             val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
-            val analysis = ImageAnalysis.Builder()
+            val analysisBuilder = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .build()
+                // More pixels per face than the default 640x480, so faces a few steps away still have detail
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+                        )
+                        .build()
+                )
+            // Allow the slowest frame rate the camera offers, so each frame can be exposed
+            // longer: much brighter, cleaner pictures in a dim room
+            slowestFrameRate(provider, selector)?.let {
+                Camera2Interop.Extender(analysisBuilder).setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it)
+            }
+            val analysis = analysisBuilder.build()
             analysis.setAnalyzer(executor, ::analyze)
 
-            val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
             try {
                 provider.unbindAll()
-                provider.bindToLifecycle(activity, selector, preview, analysis)
+                val camera = if (showPreview) provider.bindToLifecycle(activity, selector, preview, analysis)
+                else provider.bindToLifecycle(activity, selector, analysis)
+                // Expose brighter than the camera's normal target
+                val exposure = camera.cameraInfo.exposureState
+                if (exposure.isExposureCompensationSupported) {
+                    camera.cameraControl.setExposureCompensationIndex(exposure.exposureCompensationRange.upper / 2)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Camera failed to start", e)
             }
         }, activity.mainExecutor)
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun slowestFrameRate(provider: ProcessCameraProvider, selector: CameraSelector): Range<Int>? = try {
+        val info = selector.filter(provider.availableCameraInfos).firstOrNull()
+        info?.let { Camera2CameraInfo.from(it).getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) }
+            ?.minWithOrNull(compareBy<Range<Int>>({ it.lower }, { it.upper }))
+    } catch (e: Exception) {
+        null
     }
 
     /** Captures [count] face samples of whoever is in front of the camera, then calls [done] on the main thread. */
@@ -82,7 +124,7 @@ class FaceWatcher(
             if (!capturing && now - lastAnalysis < ANALYSIS_INTERVAL_MS) return
             lastAnalysis = now
 
-            val embedding = recognizer.embedLargestFace(upright(image)) ?: return
+            val embedding = recognizer.embedLargestFace(recognizer.brightenIfDark(upright(image))) ?: return
 
             if (capturing) {
                 captured.add(embedding)
@@ -96,13 +138,26 @@ class FaceWatcher(
                 return
             }
 
-            val (name, score) = guests.match(embedding)
+            // One dim, grainy frame is unreliable, so match the average of the
+            // last few seconds of the same face instead
+            while (recent.isNotEmpty() && now - recent.first().first > TRACK_WINDOW_MS) recent.removeFirst()
+            if (recent.isNotEmpty() && FaceRecognizer.similarity(embedding, averageRecent()) < SAME_PERSON) recent.clear()
+            recent.addLast(now to embedding)
+            val (name, score) = guests.match(averageRecent())
             main.post { onSighting(Sighting(name, score)) }
         } catch (e: Exception) {
             Log.w(TAG, "Face analysis failed", e)
         } finally {
             image.close()
         }
+    }
+
+    private fun averageRecent(): FloatArray {
+        val avg = FloatArray(recent.first().second.size)
+        for ((_, e) in recent) for (i in avg.indices) avg[i] += e[i]
+        val norm = sqrt(avg.sumOf { (it * it).toDouble() }).toFloat()
+        for (i in avg.indices) avg[i] /= norm
+        return avg
     }
 
     private fun upright(image: ImageProxy): Bitmap {
@@ -116,5 +171,7 @@ class FaceWatcher(
     companion object {
         private const val TAG = "FaceWatcher"
         private const val ANALYSIS_INTERVAL_MS = 300L
+        private const val TRACK_WINDOW_MS = 3_000L  // average the face over this long
+        private const val SAME_PERSON = 0.4f        // below this, a new frame is someone else
     }
 }

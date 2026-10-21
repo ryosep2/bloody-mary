@@ -1,14 +1,18 @@
 #include "web.h"
 
+#include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 
-#include "amp_audio.h"
 #include "candles.h"
 #include "secrets.h"
 #include "show.h"
+
+#if !defined(OTA_PASSWORD)
+#error "Add #define OTA_PASSWORD \"...\" to include/secrets.h (see secrets.example.h)"
+#endif
 
 const uint32_t WIFI_TIMEOUT_MS = 15000;
 const uint16_t UDP_PORT = 4210;
@@ -24,22 +28,19 @@ struct Command {
 
 static const Command COMMANDS[] = {
     {"candles_off", "/candles/off", candlesOffBurst},
-    {"audio_play", "/audio/play", ampPlay},
     {"light_on", "/light/on", []() { lightSet(true); }},
     {"reset", "/reset", showReset},
 };
 
 static void sendStatus() {
   String json = "{\"ip\":\"" + WiFi.localIP().toString() + "\"";
-  json += ",\"amp_connected\":" + String(ampIsConnected() ? "true" : "false");
-  json += ",\"playing\":" + String(ampIsPlaying() ? "true" : "false");
   json += ",\"light\":" + String(lightIsOn() ? "true" : "false");
+  json += ",\"free_heap\":" + String(ESP.getFreeHeap());
   json += "}";
   server.send(200, "application/json", json);
 }
 
-// Triggers come in as UDP packets "<id> <command>". While Bluetooth is on, the
-// Wi-Fi radio only wakes about every 100 ms, so one packet is much faster than
+// Triggers come in as UDP packets "<id> <command>": one packet is faster than
 // an HTTP request's several round trips. The phone sends each packet a few
 // times in case one is lost; copies share an id and only the first one runs.
 static void handleUdp() {
@@ -72,7 +73,7 @@ static void handleUdp() {
 
 void webBegin(const char *hostname) {
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(true);  // modem sleep is required while Bluetooth is running
+  WiFi.setSleep(false);  // radio always awake, so triggers arrive in milliseconds
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
@@ -107,9 +108,19 @@ void webBegin(const char *hostname) {
 
   udp.begin(UDP_PORT);
   Serial.printf("[web] UDP commands on port %u\n", UDP_PORT);
+
+  // Wireless firmware updates: pio run -e project_ota -t upload
+  ArduinoOTA.setHostname(hostname);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.setMdnsEnabled(false);  // already advertised above
+  ArduinoOTA.onStart([]() { Serial.println("[ota] update starting"); });
+  ArduinoOTA.onEnd([]() { Serial.println("[ota] done, restarting"); });
+  ArduinoOTA.onError([](ota_error_t e) { Serial.printf("[ota] error %u\n", e); });
+  ArduinoOTA.begin();
 }
 
 void webLoop() {
   handleUdp();
   server.handleClient();
+  ArduinoOTA.handle();
 }

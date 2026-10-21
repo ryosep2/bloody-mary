@@ -5,3 +5,6 @@
 
 #define WIFI_SSID "your-network"
 #define WIFI_PASS "your-password"
+
+// Password for wireless (OTA) firmware updates; must match secrets.ini
+#define OTA_PASSWORD "choose-a-password"

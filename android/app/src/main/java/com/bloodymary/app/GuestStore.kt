@@ -44,22 +44,18 @@ class GuestStore(context: Context) {
 
     /**
      * Returns the best-matching guest and the similarity (cosine, -1..1), or a
-     * null name when nobody is similar enough.
+     * null name when nobody is similar enough, or when two guests are about
+     * equally similar (a wrong name is worse than asking).
      */
     @Synchronized
     fun match(embedding: FloatArray): Pair<String?, Float> {
-        var bestName: String? = null
-        var best = -1f
-        for ((name, faces) in guests) {
-            for (face in faces) {
-                val score = FaceRecognizer.similarity(embedding, face)
-                if (score > best) {
-                    best = score
-                    bestName = name
-                }
-            }
-        }
-        return (if (best >= MATCH_THRESHOLD) bestName else null) to best
+        val scores = guests.mapValues { (_, faces) ->
+            faces.maxOfOrNull { FaceRecognizer.similarity(embedding, it) } ?: -1f
+        }.entries.sortedByDescending { it.value }
+        val best = scores.firstOrNull() ?: return null to -1f
+        val runnerUp = scores.getOrNull(1)?.value ?: -1f
+        val sure = best.value >= MATCH_THRESHOLD && best.value - runnerUp >= MATCH_MARGIN
+        return (if (sure) best.key else null) to best.value
     }
 
     private fun load() {
@@ -86,5 +82,8 @@ class GuestStore(context: Context) {
         // Similarity needed to call someone by name. Higher = fewer wrong names
         // but more "unknown" greetings. The app shows live scores for tuning.
         const val MATCH_THRESHOLD = 0.5f
+
+        // How far ahead of the next-best guest the best one must be
+        const val MATCH_MARGIN = 0.05f
     }
 }

@@ -1,18 +1,14 @@
 #include <Arduino.h>
+#include <esp_bt.h>
 
-#include "amp_audio.h"
 #include "candles.h"
 #include "show.h"
 #include "web.h"
 
 // Pins
-const uint8_t IR_TX_PIN = 27;         // IR LED for one half of the candles (D27)
-const uint8_t IR_TX_MIRROR_PIN = 25;  // IR LED for the other half (D25), same signal
+const uint8_t IR_TX_PIN = 27;                         // IR LED (D27)
+const uint8_t IR_TX_MIRROR_PINS[] = {25, 26, 32};     // more IR LEDs, same signal (D25, D26, D32)
 const uint8_t LIGHT_PIN = 33;         // Floodlight MOSFET gate (D33)
-
-// Bluetooth name (or the start of it) of the amplifier. If it doesn't connect,
-// check the "[amp] found ..." lines in the serial monitor for the real name.
-const char *AMP_BT_NAME = "F900S";
 
 // mDNS name: http://bloodymary.local
 const char *HOSTNAME = "bloodymary";
@@ -30,7 +26,6 @@ bool lightIsOn() {
 
 void showReset() {
   lightSet(false);
-  ampStop();
   candlesOnBurst();
 }
 
@@ -45,10 +40,6 @@ void handleSerial() {
     case '0':
       Serial.println("Candles OFF");
       candlesOffBurst();
-      break;
-    case 'a':
-      Serial.println("Playing break-in audio");
-      ampPlay();
       break;
     case 'l':
       lightSet(!lightOn);
@@ -68,15 +59,17 @@ void setup() {
   pinMode(LIGHT_PIN, OUTPUT);
   lightSet(false);
 
-  candlesBegin(IR_TX_PIN, IR_TX_MIRROR_PIN);
+  candlesBegin(IR_TX_PIN, IR_TX_MIRROR_PINS, sizeof(IR_TX_MIRROR_PINS));
 
   Serial.println();
   Serial.println("=== Bloody Mary ===");
-  Serial.println("Serial keys: 1/0 candles on/off, a play audio, l toggle light, x reset");
+  Serial.println("Serial keys: 1/0 candles on/off, l toggle light, x reset");
   Serial.println();
 
-  ampBegin(AMP_BT_NAME);
+  // No Bluetooth here (the phone drives the amp), so give its memory back
+  esp_bt_mem_release(ESP_BT_MODE_BTDM);
   webBegin(HOSTNAME);
+  Serial.printf("Free memory: %u bytes\n", ESP.getFreeHeap());
 }
 
 void loop() {

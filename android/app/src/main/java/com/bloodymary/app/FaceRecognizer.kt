@@ -12,7 +12,9 @@ import org.tensorflow.lite.Interpreter
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -24,8 +26,9 @@ class FaceRecognizer(context: Context) : Closeable {
 
     private val detector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setMinFaceSize(0.1f)
+            // Slower but finds more faces in grainy, dim frames
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setMinFaceSize(0.08f)
             .build()
     )
 
@@ -93,6 +96,37 @@ class FaceRecognizer(context: Context) : Closeable {
         return e
     }
 
+    /**
+     * In a dim room the camera picture is dark and flat. Brightens it (a gamma
+     * curve that lifts shadows most) so faces are easier to find and compare.
+     * Normally lit pictures, like imported photos, are returned unchanged.
+     */
+    fun brightenIfDark(bitmap: Bitmap): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        var sum = 0L
+        var n = 0
+        for (i in pixels.indices step 16) {
+            val p = pixels[i]
+            sum += (((p shr 16) and 0xFF) * 3 + ((p shr 8) and 0xFF) * 6 + (p and 0xFF)) / 10
+            n++
+        }
+        val mean = sum.toFloat() / n
+        if (mean >= DARK_LEVEL) return bitmap
+
+        // Pick the curve that lifts the average brightness to about mid-grey
+        val gamma = (ln(0.45) / ln(maxOf(mean, 4f) / 255.0)).coerceIn(0.35, 1.0)
+        val lut = IntArray(256) { (255.0 * (it / 255.0).pow(gamma)).toInt().coerceIn(0, 255) }
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            pixels[i] = (p and 0xFF000000.toInt()) or
+                (lut[(p shr 16) and 0xFF] shl 16) or (lut[(p shr 8) and 0xFF] shl 8) or lut[p and 0xFF]
+        }
+        return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+    }
+
     override fun close() {
         detector.close()
         interpreter?.close()
@@ -103,6 +137,7 @@ class FaceRecognizer(context: Context) : Closeable {
         const val MODEL_ASSET = "facenet_512.tflite"
         private const val INPUT_SIZE = 160
         private const val EMBEDDING_SIZE = 512
+        private const val DARK_LEVEL = 100f  // average brightness (0-255) below which a frame is brightened
 
         /** Cosine similarity of two unit-length embeddings: 1 = identical. */
         fun similarity(a: FloatArray, b: FloatArray): Float {

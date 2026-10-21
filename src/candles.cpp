@@ -22,12 +22,12 @@ static void sendBurst(uint8_t command) {
   }
 }
 
-void candlesBegin(uint8_t txPin, uint8_t mirrorPin) {
+void candlesBegin(uint8_t txPin, const uint8_t *mirrorPins, size_t mirrorCount) {
   IrSender.begin(txPin);
   // Set up the 38 kHz PWM channel now (IRremote otherwise does it on the first
-  // send), then route the same channel to the second LED so both flash in sync
+  // send), then route the same channel to the other LEDs so they flash in sync
   IrSender.enableIROut(38);
-  ledcAttachPin(mirrorPin, SEND_LEDC_CHANNEL);
+  for (size_t i = 0; i < mirrorCount; i++) ledcAttachPin(mirrorPins[i], SEND_LEDC_CHANNEL);
 }
 
 void candlesOnBurst() {

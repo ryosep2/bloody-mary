@@ -1,13 +1,17 @@
 package com.bloodymary.app
 
+import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.URL
+import java.net.UnknownHostException
 import java.util.concurrent.Executors
 import kotlin.random.Random
 
@@ -15,8 +19,12 @@ import kotlin.random.Random
  * Talks to the ESP32: show triggers go out as UDP packets (fast), status and
  * reset use HTTP (slower, but confirmed). Each has its own thread so a slow
  * status request can never delay a trigger.
+ *
+ * Android often can't resolve ".local" (mDNS) names, so every successful
+ * contact remembers the ESP32's IP address, and that IP is used whenever the
+ * name fails to resolve.
  */
-class Esp32Client(private val address: () -> String) {
+class Esp32Client(private val prefs: SharedPreferences, private val address: () -> String) {
 
     private val httpExecutor = Executors.newSingleThreadExecutor()
     private val udpExecutor = Executors.newSingleThreadExecutor()
@@ -25,6 +33,7 @@ class Esp32Client(private val address: () -> String) {
     private val socket by lazy { DatagramSocket() }
     private var resolvedHost = ""
     private var resolvedAddress: InetAddress? = null
+    private var resolvedAt = 0L
     private var nextId = Random.nextInt(1, 1_000_000)
 
     /**
@@ -68,22 +77,39 @@ class Esp32Client(private val address: () -> String) {
 
     private fun host() = address().trim().removePrefix("http://").trimEnd('/')
 
-    // Looking up bloodymary.local can be slow, so only do it when the address changes
+    // Looking up bloodymary.local can be slow, so a result is reused for a while
+    @Synchronized
     private fun resolve(host: String): InetAddress {
-        if (host != resolvedHost || resolvedAddress == null) {
-            resolvedAddress = InetAddress.getByName(host)
-            resolvedHost = host
+        val now = SystemClock.elapsedRealtime()
+        resolvedAddress?.let { if (host == resolvedHost && now - resolvedAt < RESOLVE_TTL_MS) return it }
+        val addr = try {
+            InetAddress.getByName(host)
+        } catch (e: UnknownHostException) {
+            val ip = prefs.getString(KEY_LAST_IP, null) ?: throw e
+            Log.w(TAG, "Can't resolve $host, using the last known IP $ip")
+            return InetAddress.getByName(ip)  // not reused, so the name is tried again next time
         }
-        return resolvedAddress!!
+        resolvedHost = host
+        resolvedAddress = addr
+        resolvedAt = now
+        return addr
+    }
+
+    private fun remember(addr: InetAddress) {
+        val ip = (addr as? Inet4Address)?.hostAddress ?: return
+        if (ip != prefs.getString(KEY_LAST_IP, null)) prefs.edit().putString(KEY_LAST_IP, ip).apply()
     }
 
     private fun fetch(host: String, path: String): String {
-        val conn = URL("http://$host$path").openConnection() as HttpURLConnection
+        val addr = resolve(host)
+        val conn = URL("http://${addr.hostAddress}$path").openConnection() as HttpURLConnection
         conn.connectTimeout = 1500
         conn.readTimeout = 3000
         try {
             if (conn.responseCode != 200) throw IllegalStateException("HTTP ${conn.responseCode}")
-            return conn.inputStream.bufferedReader().readText()
+            val body = conn.inputStream.bufferedReader().readText()
+            remember(addr)
+            return body
         } finally {
             conn.disconnect()
         }
@@ -94,5 +120,7 @@ class Esp32Client(private val address: () -> String) {
         private const val UDP_PORT = 4210
         private const val UDP_COPIES = 3
         private const val UDP_COPY_GAP_MS = 20L
+        private const val RESOLVE_TTL_MS = 5 * 60_000L
+        private const val KEY_LAST_IP = "last_esp_ip"
     }
 }

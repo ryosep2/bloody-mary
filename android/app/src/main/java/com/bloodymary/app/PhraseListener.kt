@@ -1,7 +1,10 @@
 package com.bloodymary.app
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -24,8 +27,11 @@ class PhraseListener(
     private val onHeard: (String) -> Unit,
 ) : RecognitionListener {
 
+    private val main = Handler(Looper.getMainLooper())
     private var model: Model? = null
     private var speech: SpeechService? = null
+    private var phraseRecognizer: Recognizer? = null
+    private var capture: Capture? = null  // listening to anything, e.g. a guest's name
     private var lastTrigger = 0L
     private var counted = 0  // phrases already acted on in the current utterance
     private var pending = 0  // consecutive partials showing a new phrase
@@ -35,12 +41,106 @@ class PhraseListener(
         StorageService.unpack(context, "model-en-us", "model",
             { loaded ->
                 model = loaded
-                val grammar = GRAMMAR.joinToString(", ", "[", "]") { "\"$it\"" }
-                val recognizer = Recognizer(loaded, SAMPLE_RATE, grammar)
-                speech = SpeechService(recognizer, SAMPLE_RATE).also { it.startListening(this) }
-                onStatus("Listening")
+                startPhraseListening()
             },
             { e -> onStatus("Speech model failed to load: ${e.message}") })
+    }
+
+    private fun startPhraseListening() {
+        val m = model ?: return
+        val grammar = GRAMMAR.joinToString(", ", "[", "]") { "\"$it\"" }
+        try {
+            val recognizer = Recognizer(m, SAMPLE_RATE, grammar)
+            phraseRecognizer = recognizer
+            speech = SpeechService(recognizer, SAMPLE_RATE).also { it.startListening(this) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Can't start listening", e)
+            onStatus("Microphone problem: ${e.message}")
+            return
+        }
+        counted = 0
+        pending = 0
+        onStatus("Listening")
+    }
+
+    // The listening thread must be stopped before the microphone is released,
+    // and the recognizer closed only after that, or the app crashes
+    private fun stopPhraseListening() {
+        speech?.let {
+            it.cancel()
+            it.shutdown()
+        }
+        speech = null
+        phraseRecognizer?.close()
+        phraseRecognizer = null
+    }
+
+    /**
+     * Listens to anything for up to [timeoutMs] (e.g. a guest saying their
+     * name) instead of only the phrase, then goes back to the phrase. [onText]
+     * gets what was said, or null if nothing was.
+     */
+    fun captureSpeech(timeoutMs: Long, onText: (String?) -> Unit) {
+        val m = model ?: return onText(null)
+        capture?.finish(null, deliver = false)
+        stopPhraseListening()  // frees the microphone for the capture
+        val c = try {
+            Capture(m, timeoutMs, onText)
+        } catch (e: Exception) {
+            Log.e(TAG, "Can't listen for a name", e)
+            startPhraseListening()
+            return onText(null)
+        }
+        capture = c
+        c.start()
+        onStatus("Listening for a name...")
+    }
+
+    fun cancelCapture() {
+        capture?.finish(null, deliver = false)
+    }
+
+    // Full-vocabulary recognition, used only briefly
+    private inner class Capture(
+        model: Model,
+        private val timeoutMs: Long,
+        private val onText: (String?) -> Unit,
+    ) : RecognitionListener {
+        private val recognizer = Recognizer(model, SAMPLE_RATE)
+        private val service = SpeechService(recognizer, SAMPLE_RATE)
+        private var latest = ""  // words so far, used if time runs out mid-sentence
+        private var done = false
+        private val timeout = Runnable { finish(latest.ifBlank { null }) }
+
+        fun start() {
+            service.startListening(this)
+            main.postDelayed(timeout, timeoutMs)
+        }
+
+        fun finish(text: String?, deliver: Boolean = true) {
+            if (done) return
+            done = true
+            main.removeCallbacks(timeout)
+            service.cancel()    // stop the listening thread first...
+            service.shutdown()  // ...then free the microphone...
+            recognizer.close()  // ...then the recognizer it was using
+            capture = null
+            startPhraseListening()
+            if (deliver) onText(text)
+        }
+
+        override fun onPartialResult(hypothesis: String) {
+            latest = JSONObject(hypothesis).optString("partial")
+            if (latest.isNotBlank()) onHeard(latest)
+        }
+
+        override fun onResult(hypothesis: String) {
+            JSONObject(hypothesis).optString("text").takeIf { it.isNotBlank() }?.let { finish(it) }
+        }
+
+        override fun onFinalResult(hypothesis: String) = onResult(hypothesis)
+        override fun onError(e: Exception) = finish(null)
+        override fun onTimeout() = finish(latest.ifBlank { null })
     }
 
     /** Stops hearing while true, e.g. while the phone itself is screaming. */
@@ -50,8 +150,8 @@ class PhraseListener(
     }
 
     fun stop() {
-        speech?.shutdown()
-        speech = null
+        cancelCapture()
+        stopPhraseListening()
         model?.close()
         model = null
     }
@@ -107,6 +207,7 @@ class PhraseListener(
         // Raise to 2 if half-said phrases still trigger (adds about 0.2 s).
         private const val CONFIRM_PARTIALS = 1
         const val COOLDOWN_MS = 2000L  // safety net against a flickering partial result
+        private const val TAG = "PhraseListener"
         private const val SAMPLE_RATE = 16000f
     }
 }
