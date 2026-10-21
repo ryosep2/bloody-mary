@@ -69,7 +69,7 @@ void setup() {
   // No Bluetooth here (the phone drives the amp), so give its memory back
   esp_bt_mem_release(ESP_BT_MODE_BTDM);
   webBegin(HOSTNAME);
-  Serial.printf("Free memory: %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("Free memory: %u bytes\n", (unsigned)ESP.getFreeHeap());
 }
 
 void loop() {
